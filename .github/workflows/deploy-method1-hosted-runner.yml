@@ -1,0 +1,83 @@
+# ============================================================
+# METODE 1: GitHub-hosted Runner
+# Runner berjalan di infrastruktur GitHub (ubuntu-latest), lalu
+# mengirim file aplikasi ke server tujuan via SSH menggunakan
+# AUTENTIKASI USERNAME + PASSWORD (sshpass) — BUKAN SSH key.
+#
+# CATATAN KEAMANAN (khusus praktikum kelas):
+#   Autentikasi SSH dengan password (apalagi password lemah seperti
+#   "ubuntu") TIDAK direkomendasikan untuk produksi. Gunakan SSH key
+#   di lingkungan nyata. Workflow ini sengaja dibuat memakai
+#   username/password karena tujuannya adalah latihan CI/CD dasar.
+#
+# SECRETS yang wajib diisi di:
+#   Repo GitHub -> Settings -> Secrets and variables -> Actions
+#
+#   SERVER_HOST   = domain publik atau IP server tujuan
+#   SERVER_PORT   = port SSH (default 22)
+#   SERVER_USER   = ubuntu
+#   SERVER_PASS   = ubuntu
+#   DEPLOY_PATH   = /var/www/perpus-mini
+#   DB_HOST       = IP/hostname server database
+#   DB_PORT       = 3306
+#   DB_NAME       = perpus_mini
+#   DB_USER       = perpus_app
+#   DB_PASS       = password user database
+# ============================================================
+
+name: Deploy (Method 1 - GitHub-hosted Runner)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Buat file .env dari GitHub Secrets
+        run: |
+          cat > .env << EOF
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASS=${{ secrets.DB_PASS }}
+          EOF
+
+      - name: Pastikan folder tujuan ada di server
+        run: |
+          sshpass -p "${{ secrets.SERVER_PASS }}" ssh -o StrictHostKeyChecking=no \
+            -p "${{ secrets.SERVER_PORT }}" \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "sudo mkdir -p ${{ secrets.DEPLOY_PATH }} && sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} ${{ secrets.DEPLOY_PATH }}"
+
+      - name: Kirim seluruh file aplikasi via rsync (over SSH password)
+        run: |
+          sshpass -p "${{ secrets.SERVER_PASS }}" rsync -avz --delete \
+            -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.SERVER_PORT }}" \
+            --exclude '.git' --exclude '.github' \
+            ./ "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${{ secrets.DEPLOY_PATH }}/"
+
+      - name: Set permission & restart PHP-FPM/Nginx di server
+        run: |
+          sshpass -p "${{ secrets.SERVER_PASS }}" ssh -o StrictHostKeyChecking=no \
+            -p "${{ secrets.SERVER_PORT }}" \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" << 'EOF'
+            sudo chown -R www-data:www-data ${{ secrets.DEPLOY_PATH }} || true
+            sudo find ${{ secrets.DEPLOY_PATH }} -type f -exec chmod 644 {} \;
+            sudo find ${{ secrets.DEPLOY_PATH }} -type d -exec chmod 755 {} \;
+            sudo systemctl restart php8.3-fpm 2>/dev/null || sudo rc-service php-fpm83 restart || true
+            sudo systemctl restart nginx 2>/dev/null || sudo rc-service nginx restart || true
+          EOF
+
+      - name: Selesai
+        run: echo "Deploy Method 1 (hosted runner) selesai ke ${{ secrets.SERVER_HOST }}"
