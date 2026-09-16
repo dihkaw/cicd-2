@@ -1,0 +1,93 @@
+# ============================================================
+# METODE 2: Self-Hosted Runner
+# Runner GitHub Actions di-install & didaftarkan LANGSUNG di server
+# tujuan (Settings -> Actions -> Runners -> New self-hosted runner).
+# Karena runner sudah berjalan DI DALAM server tersebut, proses deploy
+# tidak perlu SSH/sshpass sama sekali — cukup copy file secara lokal.
+#
+# INI KEUNGGULAN metode 2 dibanding metode 1: tidak perlu menyimpan
+# username/password server sebagai secret sama sekali untuk server
+# tempat runner itu berjalan. Namun tetap disiapkan opsi SSH (sshpass)
+# untuk skenario arsitektur HA (1 runner mendorong ke beberapa web
+# server lain) — lihat langkah opsional di bagian bawah.
+#
+# CARA REGISTER RUNNER DI SERVER (dijalankan manual sekali via CLI,
+# BUKAN oleh workflow ini):
+#   mkdir actions-runner && cd actions-runner
+#   curl -o actions-runner-linux-x64.tar.gz -L \
+#     https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64.tar.gz
+#   tar xzf actions-runner-linux-x64.tar.gz
+#   ./config.sh --url https://github.com/<user>/<repo> --token <TOKEN_DARI_GITHUB>
+#   sudo ./svc.sh install
+#   sudo ./svc.sh start
+#
+# SECRETS yang wajib diisi (sama seperti Metode 1, agar workflow bisa
+# dipakai bergantian tanpa ubah konfigurasi):
+#   DEPLOY_PATH   = /var/www/perpus-mini
+#   DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+#
+#   (SERVER_HOST/SERVER_USER/SERVER_PASS hanya dipakai jika Anda
+#    mengaktifkan langkah opsional "distribusi ke web server lain"
+#    di bagian bawah, untuk arsitektur HA multi-web-server)
+# ============================================================
+
+name: Deploy (Method 2 - Self-Hosted Runner)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Buat file .env dari GitHub Secrets
+        run: |
+          cat > .env << EOF
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASS=${{ secrets.DB_PASS }}
+          EOF
+
+      - name: Deploy lokal (copy dari workspace runner ke document root)
+        run: |
+          sudo mkdir -p "${{ secrets.DEPLOY_PATH }}"
+          sudo rsync -avz --delete \
+            --exclude '.git' --exclude '.github' \
+            ./ "${{ secrets.DEPLOY_PATH }}/"
+          sudo chown -R www-data:www-data "${{ secrets.DEPLOY_PATH }}"
+          sudo find "${{ secrets.DEPLOY_PATH }}" -type f -exec chmod 644 {} \;
+          sudo find "${{ secrets.DEPLOY_PATH }}" -type d -exec chmod 755 {} \;
+
+      - name: Restart PHP-FPM & Nginx
+        run: |
+          sudo systemctl restart php8.3-fpm 2>/dev/null || sudo rc-service php-fpm83 restart || true
+          sudo systemctl restart nginx 2>/dev/null || sudo rc-service nginx restart || true
+
+      # ------------------------------------------------------------
+      # LANGKAH OPSIONAL — hanya untuk arsitektur HA (1 LB + beberapa
+      # web server). Aktifkan (hapus tanda pagar) jika runner ini
+      # bertindak sebagai "hub" yang mendorong ke web server lain
+      # via SSH username/password (tanpa SSH key), mirip Metode 1.
+      # ------------------------------------------------------------
+      # - name: Install sshpass (untuk distribusi ke web server lain)
+      #   run: sudo apt-get update && sudo apt-get install -y sshpass
+      #
+      # - name: Distribusi ke web server HA lainnya
+      #   run: |
+      #     for HOST in ${{ secrets.SERVER_HOST_2 }} ${{ secrets.SERVER_HOST_3 }}; do
+      #       sshpass -p "${{ secrets.SERVER_PASS }}" rsync -avz --delete \
+      #         -e "ssh -o StrictHostKeyChecking=no" \
+      #         --exclude '.git' --exclude '.github' \
+      #         ./ "${{ secrets.SERVER_USER }}@$HOST:${{ secrets.DEPLOY_PATH }}/"
+      #     done
+
+      - name: Selesai
+        run: echo "Deploy Method 2 (self-hosted runner) selesai di server lokal runner ini."
